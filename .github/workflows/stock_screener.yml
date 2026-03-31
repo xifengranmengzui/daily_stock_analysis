@@ -1,0 +1,140 @@
+name: 策略选股
+
+on:
+  # 手动触发（主要使用方式）
+  workflow_dispatch:
+    inputs:
+      min_market_cap:
+        description: '最小市值（亿）'
+        required: false
+        default: '20'
+        type: string
+      max_market_cap:
+        description: '最大市值（亿）'
+        required: false
+        default: '500'
+        type: string
+      ma_bullish:
+        description: '均线多头排列筛选'
+        required: false
+        default: true
+        type: boolean
+      chip_check:
+        description: '筹码集中度筛选'
+        required: false
+        default: true
+        type: boolean
+      max_pe:
+        description: '最大动态市盈率（0=不限）'
+        required: false
+        default: '200'
+        type: string
+      output_limit:
+        description: '输出数量上限'
+        required: false
+        default: '30'
+        type: string
+      auto_update_stock_list:
+        description: '自动更新 STOCK_LIST 变量'
+        required: false
+        default: false
+        type: boolean
+
+  # 定时触发（可选：每周五收盘后运行）
+  # schedule:
+  #   - cron: '30 8 * * 5'  # UTC 8:30 = 北京时间 16:30（周五收盘后）
+
+concurrency:
+  group: stock-screener
+  cancel-in-progress: true
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install efinance akshare pandas
+
+      - name: 执行策略选股
+        id: screener
+        env:
+          SCREEN_MIN_MARKET_CAP: ${{ github.event.inputs.min_market_cap || '20' }}
+          SCREEN_MAX_MARKET_CAP: ${{ github.event.inputs.max_market_cap || '500' }}
+          SCREEN_MA_BULLISH: ${{ github.event.inputs.ma_bullish || 'true' }}
+          SCREEN_CHIP_CHECK: ${{ github.event.inputs.chip_check || 'true' }}
+          SCREEN_MAX_PE: ${{ github.event.inputs.max_pe || '200' }}
+          SCREEN_OUTPUT_LIMIT: ${{ github.event.inputs.output_limit || '30' }}
+          SCREEN_MIN_PRICE: '5'
+          SCREEN_VOLUME_SHRINK: '0.8'
+          SCREEN_SORT_BY: 'market_cap'
+        run: python stock_screener.py
+
+      - name: 上传选股结果
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: screener-results-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      - name: 显示选股结果
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 选股完成"
+          echo "=========================================="
+          if [ -f "reports/stock_list_$(date +%Y%m%d).txt" ]; then
+            echo "STOCK_LIST:"
+            cat reports/stock_list_$(date +%Y%m%d).txt
+            echo ""
+          fi
+          if [ -f "reports/screener_$(date +%Y%m%d).md" ]; then
+            echo ""
+            echo "详细报告见 Artifacts 下载"
+          fi
+
+      - name: 自动更新 STOCK_LIST 变量
+        if: ${{ github.event.inputs.auto_update_stock_list == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STOCK_LIST=$(cat reports/stock_list_$(date +%Y%m%d).txt 2>/dev/null || echo "")
+          if [ -z "$STOCK_LIST" ]; then
+            echo "⚠️ 选股结果为空，跳过更新"
+            exit 0
+          fi
+          echo "正在更新 STOCK_LIST 变量..."
+          # 尝试更新（如果变量存在）
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/variables/STOCK_LIST" \
+            -d "{\"value\":\"$STOCK_LIST\"}")
+          if [ "$STATUS" = "204" ]; then
+            echo "✅ STOCK_LIST 已更新为: $STOCK_LIST"
+          else
+            # 变量不存在，创建新变量
+            curl -s -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/variables" \
+              -d "{\"name\":\"STOCK_LIST\",\"value\":\"$STOCK_LIST\"}"
+            echo "✅ STOCK_LIST 变量已创建: $STOCK_LIST"
+          fi
