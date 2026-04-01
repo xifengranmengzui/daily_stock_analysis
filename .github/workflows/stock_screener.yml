@@ -51,7 +51,8 @@ concurrency:
 jobs:
   screen:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # 全市场均线逐只请求可能超过 25 分钟；过短会导致取消且不落盘，Artifacts 为空
+    timeout-minutes: 90
 
     steps:
       - name: 检出代码
@@ -82,12 +83,23 @@ jobs:
           SCREEN_SORT_BY: 'market_cap'
         run: python stock_screener.py
 
+      # 脚本异常中断或未执行到写盘时，保证 reports/ 下仍有文件可上传，避免 Artifacts 完全空白
+      - name: 兜底 reports 目录
+        if: always()
+        run: |
+          mkdir -p reports
+          if ! compgen -G "reports/*" > /dev/null; then
+            echo "未生成任何选股文件（任务被取消、超时或 Python 崩溃）。请查看「执行策略选股」日志。" > reports/artifacts_empty_reason.txt
+            echo "runner_utc=$(date -u -Iseconds)" >> reports/artifacts_empty_reason.txt
+          fi
+
       - name: 上传选股结果
         uses: actions/upload-artifact@v6
         if: always()
         with:
           name: screener-results-${{ github.run_number }}
           path: reports/
+          if-no-files-found: warn
           retention-days: 30
 
       - name: 显示选股结果
@@ -95,11 +107,15 @@ jobs:
         run: |
           echo ""
           echo "=========================================="
-          echo "📊 选股完成"
+          echo "📊 选股流程已结束（若中间无符合标的，见 Artifacts 内 screener_status_*.txt）"
           echo "=========================================="
           if [ -f "reports/stock_list_$(date +%Y%m%d).txt" ]; then
             echo "STOCK_LIST:"
             cat reports/stock_list_$(date +%Y%m%d).txt
+            echo ""
+          elif [ -f reports/screener_status_$(date +%Y%m%d).txt ]; then
+            echo "无 stock_list 文件，运行说明:"
+            cat "reports/screener_status_$(date +%Y%m%d).txt"
             echo ""
           fi
           if [ -f "reports/screener_$(date +%Y%m%d).md" ]; then
